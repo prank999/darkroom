@@ -1,313 +1,215 @@
-// Benchmark for photo editing engine
 #include <iostream>
 #include <chrono>
+#include <random>
 #include <iomanip>
-#include <cstring>
+#include <fstream>
 
-#include "document/ImageSource.h"
-#include "document/Document.h"
-#include "adjustments/AdjustmentState.h"
-#include "rendering/Renderer.h"
-#include "color/ColorSpace.h"
+#include "core/image.hpp"
+#include "adjustments/adjustment_state.hpp"
+#include "render/renderer.hpp"
 
-using namespace photo;
+using namespace pe;
 using namespace std::chrono;
 
-// Create a large test image (simulating 24MP = ~6000x4000)
-std::shared_ptr<ImageSource> createLargeImage(int width, int height) {
-    std::cout << "Creating " << width << "x" << height << " test image... ";
-    std::cout.flush();
-    
+// ============================================================================
+// Generate a test image (synthetic gradient pattern)
+// ============================================================================
+
+SourceImage generateTestImage(uint32_t width, uint32_t height) {
     std::vector<uint8_t> data(width * height * 4);
     
-    // Create realistic gradient pattern with some variation
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
+    std::random_device rd;
+    std::mt19937 gen(42);  // Fixed seed for reproducibility
+    std::uniform_int_distribution<> dist(0, 255);
+    
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            // Create a gradient with some noise
+            float grad = static_cast<float>(x + y) / (width + height);
+            
+            uint8_t r = static_cast<uint8_t>(grad * 255.0f + (dist(gen) - 128) * 0.1f);
+            uint8_t g = static_cast<uint8_t>((1.0f - grad) * 255.0f + (dist(gen) - 128) * 0.1f);
+            uint8_t b = static_cast<uint8_t>(128 + (dist(gen) - 128) * 0.3f);
+            
             size_t idx = (y * width + x) * 4;
-            
-            // Create varied pattern to prevent compression artifacts in processing
-            float nx = static_cast<float>(x) / width;
-            float ny = static_cast<float>(y) / height;
-            
-            data[idx + 0] = static_cast<uint8_t>(255 * (0.5f + 0.5f * nx));
-            data[idx + 1] = static_cast<uint8_t>(255 * (0.5f + 0.5f * ny));
-            data[idx + 2] = static_cast<uint8_t>(128 + 64 * std::sin(nx * 10) * std::cos(ny * 10));
+            data[idx] = r;
+            data[idx + 1] = g;
+            data[idx + 2] = b;
             data[idx + 3] = 255;
         }
     }
     
-    auto source = ImageSource::createFromData(data.data(), width, height, 4);
-    std::cout << "Done (" << (width * height / 1000000.0f) << " MP)" << std::endl;
-    
-    return source;
+    return SourceImage::fromU8Data(data, width, height, 4);
 }
 
-void printSeparator() {
-    std::cout << std::string(70, '=') << std::endl;
+// ============================================================================
+// Benchmark function
+// ============================================================================
+
+struct BenchmarkResult {
+    double preview_time_ms = 0;
+    double full_time_ms = 0;
+    size_t memory_bytes = 0;
+    double pixels_per_second = 0;
+};
+
+BenchmarkResult runBenchmark(const SourceImage& source, const AdjustmentState& state, 
+                             int iterations = 3) {
+    BenchmarkResult result;
+    
+    CPURenderer renderer;
+    
+    // Warm up
+    RenderOptions warm_opts;
+    warm_opts.use_cache = false;
+    renderer.render(source, state, warm_opts);
+    
+    // Preview benchmark
+    RenderOptions preview_opts;
+    preview_opts.preview_mode = true;
+    preview_opts.preview_max_dim = 1920;
+    preview_opts.use_cache = false;
+    
+    auto start = high_resolution_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        renderer.render(source, state, preview_opts);
+    }
+    auto end = high_resolution_clock::now();
+    result.preview_time_ms = duration<double, std::milli>(end - start).count() / iterations;
+    
+    // Full resolution benchmark
+    RenderOptions full_opts;
+    full_opts.preview_mode = false;
+    full_opts.use_cache = false;
+    
+    start = high_resolution_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        renderer.render(source, state, full_opts);
+    }
+    end = high_resolution_clock::now();
+    result.full_time_ms = duration<double, std::milli>(end - start).count() / iterations;
+    
+    // Calculate throughput
+    size_t total_pixels = source.width() * source.height();
+    result.pixels_per_second = total_pixels / (result.full_time_ms / 1000.0);
+    
+    // Estimate memory usage
+    result.memory_bytes = source.dataSize() + total_pixels * 3 * sizeof(float);
+    
+    return result;
 }
 
-void printHeader(const std::string& title) {
-    printSeparator();
-    std::cout << title << std::endl;
-    printSeparator();
-}
+// ============================================================================
+// Main
+// ============================================================================
 
-int main() {
-    printHeader("Photo Engine Benchmark Suite");
+int main(int argc, char* argv[]) {
+    std::cout << "========================================\n";
+    std::cout << "Photo Engine Benchmark Suite\n";
+    std::cout << "========================================\n\n";
     
-    // Create test images
-    // 24MP is approximately 6000x4000
-    const int WIDTH = 6000;
-    const int HEIGHT = 4000;
-    const double MEGAPIXELS = (WIDTH * HEIGHT) / 1000000.0;
-    
-    auto source = createLargeImage(WIDTH, HEIGHT);
-    
-    // Test adjustment states
-    AdjustmentState identity;
-    
-    AdjustmentState moderate;
-    moderate.exposure = 0.5f;
-    moderate.contrast = 20.0f;
-    moderate.highlights = -15.0f;
-    moderate.shadows = 25.0f;
-    moderate.temperature = 10.0f;
-    moderate.saturation = 15.0f;
-    
-    AdjustmentState heavy;
-    heavy.exposure = 1.0f;
-    heavy.contrast = 40.0f;
-    heavy.highlights = -50.0f;
-    heavy.shadows = 50.0f;
-    heavy.whites = 20.0f;
-    heavy.blacks = -15.0f;
-    heavy.temperature = 25.0f;
-    heavy.tint = 10.0f;
-    heavy.vibrance = 30.0f;
-    heavy.saturation = 20.0f;
-    heavy.rgbCurve = {
-        {0.0f, 0.0f},
-        {0.25f, 0.22f},
-        {0.5f, 0.55f},
-        {0.75f, 0.78f},
-        {1.0f, 1.0f}
-    };
-    
-    Renderer renderer;
-    
-    struct BenchmarkResult {
+    // Test image sizes
+    struct TestCase {
         std::string name;
-        double timeMs;
-        double mpPerSec;
+        uint32_t width;
+        uint32_t height;
     };
     
-    std::vector<BenchmarkResult> results;
+    std::vector<TestCase> test_cases = {
+        {"HD (1920x1080)", 1920, 1080},
+        {"4K (3840x2160)", 3840, 2160},
+        {"12MP (4000x3000)", 4000, 3000},
+        {"24MP (6000x4000)", 6000, 4000},  // Target: 24 megapixels
+        {"50MP (8000x6250)", 8000, 6250},
+    };
     
-    // ========================================================================
-    // Preview Render Benchmarks
-    // ========================================================================
-    printHeader("Preview Rendering (25% scale)");
+    // Adjustment states to test
+    struct AdjustCase {
+        std::string name;
+        AdjustmentState state;
+    };
     
-    {
-        RenderOptions opts;
-        opts.scale = 0.25f;
-        opts.previewMode = true;
+    std::vector<AdjustCase> adjust_cases = {
+        {"Identity", AdjustmentState{}},
+        {"Exposure +1EV", [](){
+            AdjustmentState s;
+            s.exposure = 1.0f;
+            return s;
+        }()},
+        {"Full Adjustments", [](){
+            AdjustmentState s;
+            s.exposure = 0.5f;
+            s.contrast = 20.0f;
+            s.highlights = -30.0f;
+            s.shadows = 40.0f;
+            s.whites = 10.0f;
+            s.blacks = -5.0f;
+            s.temperature = 5500.0f;
+            s.tint = 10.0f;
+            s.vibrance = 25.0f;
+            s.saturation = 15.0f;
+            s.tone_curves.rgb().addControlPoint(0.25f, 0.3f);
+            s.tone_curves.rgb().addControlPoint(0.75f, 0.7f);
+            return s;
+        }()}
+    };
+    
+    for (const auto& tc : test_cases) {
+        std::cout << "\n----------------------------------------\n";
+        std::cout << "Image: " << tc.name << " (" << tc.width << "x" << tc.height << ")\n";
+        std::cout << "Total pixels: " << (tc.width * tc.height) / 1000000 << " MP\n";
+        std::cout << "----------------------------------------\n\n";
         
-        // Warm up
-        auto warmup = renderer.render(source, identity, opts);
+        SourceImage source = generateTestImage(tc.width, tc.height);
         
-        // Benchmark
-        auto start = high_resolution_clock::now();
-        int iterations = 5;
-        
-        for (int i = 0; i < iterations; ++i) {
-            auto result = renderer.render(source, identity, opts);
+        for (const auto& ac : adjust_cases) {
+            std::cout << "Adjustment: " << ac.name << "\n";
+            
+            BenchmarkResult result = runBenchmark(source, ac.state, 3);
+            
+            std::cout << std::fixed << std::setprecision(2);
+            std::cout << "  Preview render time: " << result.preview_time_ms << " ms\n";
+            std::cout << "  Full render time:    " << result.full_time_ms << " ms\n";
+            std::cout << "  Throughput:          " << (result.pixels_per_second / 1000000.0) << " MP/s\n";
+            std::cout << "  Memory estimate:     " << (result.memory_bytes / 1024.0 / 1024.0) << " MB\n";
+            std::cout << "\n";
         }
-        
-        auto end = high_resolution_clock::now();
-        double elapsed = duration<double, std::milli>(end - start).count() / iterations;
-        double mpPerSec = (MEGAPIXELS * 0.25 * 0.25) / (elapsed / 1000.0);
-        
-        std::cout << "Identity adjustments:     " << std::fixed << std::setprecision(1) 
-                  << elapsed << " ms (" << std::setprecision(1) << mpPerSec << " MP/s)" << std::endl;
-        results.push_back({"Preview (identity)", elapsed, mpPerSec});
     }
     
-    {
-        RenderOptions opts;
-        opts.scale = 0.25f;
-        opts.previewMode = true;
-        
-        auto start = high_resolution_clock::now();
-        int iterations = 5;
-        
-        for (int i = 0; i < iterations; ++i) {
-            auto result = renderer.render(source, moderate, opts);
-        }
-        
-        auto end = high_resolution_clock::now();
-        double elapsed = duration<double, std::milli>(end - start).count() / iterations;
-        double mpPerSec = (MEGAPIXELS * 0.25 * 0.25) / (elapsed / 1000.0);
-        
-        std::cout << "Moderate adjustments:     " << std::fixed << std::setprecision(1) 
-                  << elapsed << " ms (" << std::setprecision(1) << mpPerSec << " MP/s)" << std::endl;
-        results.push_back({"Preview (moderate)", elapsed, mpPerSec});
-    }
+    // Test caching effectiveness
+    std::cout << "\n========================================\n";
+    std::cout << "Cache Effectiveness Test\n";
+    std::cout << "========================================\n\n";
     
-    {
-        RenderOptions opts;
-        opts.scale = 0.25f;
-        opts.previewMode = true;
-        
-        auto start = high_resolution_clock::now();
-        int iterations = 5;
-        
-        for (int i = 0; i < iterations; ++i) {
-            auto result = renderer.render(source, heavy, opts);
-        }
-        
-        auto end = high_resolution_clock::now();
-        double elapsed = duration<double, std::milli>(end - start).count() / iterations;
-        double mpPerSec = (MEGAPIXELS * 0.25 * 0.25) / (elapsed / 1000.0);
-        
-        std::cout << "Heavy adjustments:        " << std::fixed << std::setprecision(1) 
-                  << elapsed << " ms (" << std::setprecision(1) << mpPerSec << " MP/s)" << std::endl;
-        results.push_back({"Preview (heavy)", elapsed, mpPerSec});
-    }
+    SourceImage cache_source = generateTestImage(4000, 3000);
+    AdjustmentState cache_state;
+    cache_state.exposure = 0.5f;
     
-    // ========================================================================
-    // Full Resolution Render Benchmarks
-    // ========================================================================
-    printHeader("Full Resolution Rendering (100% scale)");
+    CPURenderer renderer;
     
-    {
-        RenderOptions opts;
-        opts.scale = 1.0f;
-        opts.previewMode = false;
-        opts.highQuality = true;
-        
-        // Warm up
-        auto warmup = renderer.render(source, identity, opts);
-        
-        // Benchmark
-        auto start = high_resolution_clock::now();
-        int iterations = 3;
-        
-        for (int i = 0; i < iterations; ++i) {
-            auto result = renderer.render(source, identity, opts);
-        }
-        
-        auto end = high_resolution_clock::now();
-        double elapsed = duration<double, std::milli>(end - start).count() / iterations;
-        double mpPerSec = MEGAPIXELS / (elapsed / 1000.0);
-        
-        std::cout << "Identity adjustments:     " << std::fixed << std::setprecision(1) 
-                  << elapsed << " ms (" << std::setprecision(2) << mpPerSec << " MP/s)" << std::endl;
-        results.push_back({"Full (identity)", elapsed, mpPerSec});
-    }
+    RenderOptions opts;
+    opts.use_cache = true;
     
-    {
-        RenderOptions opts;
-        opts.scale = 1.0f;
-        opts.previewMode = false;
-        opts.highQuality = true;
-        
-        auto start = high_resolution_clock::now();
-        int iterations = 3;
-        
-        for (int i = 0; i < iterations; ++i) {
-            auto result = renderer.render(source, moderate, opts);
-        }
-        
-        auto end = high_resolution_clock::now();
-        double elapsed = duration<double, std::milli>(end - start).count() / iterations;
-        double mpPerSec = MEGAPIXELS / (elapsed / 1000.0);
-        
-        std::cout << "Moderate adjustments:     " << std::fixed << std::setprecision(1) 
-                  << elapsed << " ms (" << std::setprecision(2) << mpPerSec << " MP/s)" << std::endl;
-        results.push_back({"Full (moderate)", elapsed, mpPerSec});
-    }
+    // First render (cache miss)
+    auto start = high_resolution_clock::now();
+    auto r1 = renderer.render(cache_source, cache_state, opts);
+    auto end = high_resolution_clock::now();
+    double first_time = duration<double, std::milli>(end - start).count();
     
-    {
-        RenderOptions opts;
-        opts.scale = 1.0f;
-        opts.previewMode = false;
-        opts.highQuality = true;
-        
-        auto start = high_resolution_clock::now();
-        int iterations = 3;
-        
-        for (int i = 0; i < iterations; ++i) {
-            auto result = renderer.render(source, heavy, opts);
-        }
-        
-        auto end = high_resolution_clock::now();
-        double elapsed = duration<double, std::milli>(end - start).count() / iterations;
-        double mpPerSec = MEGAPIXELS / (elapsed / 1000.0);
-        
-        std::cout << "Heavy adjustments:        " << std::fixed << std::setprecision(1) 
-                  << elapsed << " ms (" << std::setprecision(2) << mpPerSec << " MP/s)" << std::endl;
-        results.push_back({"Full (heavy)", elapsed, mpPerSec});
-    }
+    // Second render (cache hit)
+    start = high_resolution_clock::now();
+    auto r2 = renderer.render(cache_source, cache_state, opts);
+    end = high_resolution_clock::now();
+    double second_time = duration<double, std::milli>(end - start).count();
     
-    // ========================================================================
-    // Memory Usage Estimate
-    // ========================================================================
-    printHeader("Memory Usage Estimates");
+    std::cout << "First render (cache miss):  " << std::fixed << std::setprecision(2) << first_time << " ms\n";
+    std::cout << "Second render (cache hit): " << std::fixed << std::setprecision(2) << second_time << " ms\n";
+    std::cout << "Speedup:                   " << std::fixed << std::setprecision(1) << (first_time / second_time) << "x\n";
+    std::cout << "Cache memory usage:        " << (renderer.getCache().getMemoryUsage() / 1024.0 / 1024.0) << " MB\n";
     
-    size_t sourceSize = source->data().size() * sizeof(float);
-    size_t fullRenderSize = WIDTH * HEIGHT * 4 * sizeof(float);  // RGBA output
-    size_t previewSize = (WIDTH/4) * (HEIGHT/4) * 4 * sizeof(float);
-    
-    std::cout << "Source image (linear RGB):  " << (sourceSize / 1024 / 1024) << " MB" << std::endl;
-    std::cout << "Full render (RGBA float):   " << (fullRenderSize / 1024 / 1024) << " MB" << std::endl;
-    std::cout << "Preview render (RGBA float): " << (previewSize / 1024 / 1024) << " MB" << std::endl;
-    std::cout << "Total (source + full + preview): " 
-              << ((sourceSize + fullRenderSize + previewSize) / 1024 / 1024) << " MB" << std::endl;
-    
-    // ========================================================================
-    // Async Rendering Test
-    // ========================================================================
-    printHeader("Async Rendering Test");
-    
-    {
-        auto start = high_resolution_clock::now();
-        
-        auto future = renderer.renderAsync(source, moderate, RenderOptions{1.0f});
-        
-        // Do other work while rendering...
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        
-        auto result = future.get();
-        
-        auto end = high_resolution_clock::now();
-        double elapsed = duration<double, std::milli>(end - start).count();
-        
-        std::cout << "Async full render:        " << std::fixed << std::setprecision(1) 
-                  << elapsed << " ms (non-blocking)" << std::endl;
-        std::cout << "Result valid:             " << (result ? "Yes" : "No") << std::endl;
-    }
-    
-    // ========================================================================
-    // Summary
-    // ========================================================================
-    printHeader("Benchmark Summary");
-    
-    std::cout << std::left << std::setw(25) << "Test" 
-              << std::right << std::setw(12) << "Time (ms)" 
-              << std::setw(15) << "Throughput" << std::endl;
-    printSeparator();
-    
-    for (const auto& r : results) {
-        std::cout << std::left << std::setw(25) << r.name
-                  << std::right << std::setw(12) << std::fixed << std::setprecision(1) << r.timeMs
-                  << std::setw(12) << std::setprecision(2) << r.mpPerSec << " MP/s" << std::endl;
-    }
-    
-    printSeparator();
-    std::cout << "Image size: " << WIDTH << "x" << HEIGHT << " (" 
-              << std::fixed << std::setprecision(1) << MEGAPIXELS << " MP)" << std::endl;
-    std::cout << "CPU: Single-threaded (can be parallelized)" << std::endl;
+    std::cout << "\n========================================\n";
+    std::cout << "Benchmark Complete\n";
+    std::cout << "========================================\n";
     
     return 0;
 }

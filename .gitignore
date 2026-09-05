@@ -1,51 +1,44 @@
 ```
 # Build artifacts
-*.o
-*.obj
-*.a
-*.lib
-*.so
-*.dll
-*.dylib
-*.exe
-*.out
-
-# CMake build directories
 build/
-cmake-build-*/
-CMakeFiles/
-CMakeCache.txt
-Makefile
-compile_commands.json
+dist/
 
 # Dependencies
-third_party/
+.externalNativeBuild/
+.cmake/
+CMakeFiles/
+cmake_install.cmake
+Makefile
 
 # Logs and temp files
 *.log
 *.tmp
 *.swp
 
-# Coverage reports
-coverage/
-htmlcov/
-*.gcda
-*.gcno
-
-# IDE specific
+# Editors
 .vscode/
 .idea/
-*.swp
-*.swo
 
-# OS specific
+# OS generated files
 .DS_Store
 Thumbs.db
 
-# Testing
-*.gtest
-*.test
+# Compiled files
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+*.out
+
+# C++ specific
+*.gch
+*.pch
+*.ilk
+*.pdb
+*.suo
+ipch/
 ```node_modules/
 .next/
-dist/
-node_modules/
