@@ -1,5 +1,50 @@
-node_modules/
+```
+# Build artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+
+# CMake build directories
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+compile_commands.json
+
+# Dependencies
+third_party/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+
+# Coverage reports
+coverage/
+htmlcov/
+*.gcda
+*.gcno
+
+# IDE specific
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Testing
+*.gtest
+*.test
+```node_modules/
 .next/
 dist/
-build/
-*.log
