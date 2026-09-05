@@ -42,3 +42,4 @@ Thumbs.db
 ipch/
 ```node_modules/
 .next/
+node_modules/
