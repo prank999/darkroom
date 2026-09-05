@@ -1,23 +1,24 @@
 #include "color/color_space.hpp"
 #include <cmath>
+#include <algorithm>
 
 namespace pe {
 
-// Approximate Planckian radiator chromaticity (McCamy's formula)
-ChromaticAdaptation::WhitePoint ChromaticAdaptation::getWhitePointForTemperature(float kelvin) {
-    // Clamp to reasonable range
+// McCamy's formula and related approximations for Planckian locus
+ChromaticAdaptation::WhitePoint 
+ChromaticAdaptation::getWhitePointForTemperature(float kelvin) {
     kelvin = std::clamp(kelvin, 1000.0f, 50000.0f);
     
     float x, y;
     
-    // Use approximation formulas for Planckian locus
+    // Use Kim et al. approximation for better accuracy
     if (kelvin <= 6600.0f) {
-        x = -0.2661239f * (1e9f / (kelvin * kelvin * kelvin)) 
+        x = -0.2661239f * (1e9f / std::pow(kelvin, 3)) 
             - 0.2343589f * (1e6f / (kelvin * kelvin)) 
             + 0.8776956f * (1000.0f / kelvin) 
             + 0.179910f;
     } else {
-        x = -3.0258469f * (1e9f / (kelvin * kelvin * kelvin)) 
+        x = -3.0258469f * (1e9f / std::pow(kelvin, 3)) 
             + 2.1070379f * (1e6f / (kelvin * kelvin)) 
             + 0.2226347f * (1000.0f / kelvin) 
             + 0.240390f;
@@ -31,7 +32,7 @@ ChromaticAdaptation::WhitePoint ChromaticAdaptation::getWhitePointForTemperature
         y = 0.0000029f * x * x * x - 0.0001274f * x * x + 0.0178984f * x + 0.2685703f;
     }
     
-    // Convert xyY to XYZ (Y = 1.0 for normalization)
+    // Convert xyY to XYZ (Y = 1.0)
     WhitePoint wp;
     wp.Y = 1.0f;
     wp.X = wp.Y * x / y;
@@ -40,8 +41,10 @@ ChromaticAdaptation::WhitePoint ChromaticAdaptation::getWhitePointForTemperature
     return wp;
 }
 
-void ChromaticAdaptation::buildBradfordMatrix(const WhitePoint& srcWP, const WhitePoint& dstWP, float matrix[3][3]) {
-    // Bradford cone response domain transformation matrix
+void ChromaticAdaptation::buildBradfordMatrix(const WhitePoint& srcWP, 
+                                               const WhitePoint& dstWP, 
+                                               float matrix[3][3]) {
+    // Bradford cone response transformation
     constexpr float bradford[3][3] = {
         { 0.8951f,  0.2664f, -0.1614f},
         {-0.0172f,  0.6659f,  0.0313f},
@@ -65,14 +68,13 @@ void ChromaticAdaptation::buildBradfordMatrix(const WhitePoint& srcWP, const Whi
     dst_cone[1] = bradford[1][0] * dstWP.X + bradford[1][1] * dstWP.Y + bradford[1][2] * dstWP.Z;
     dst_cone[2] = bradford[2][0] * dstWP.X + bradford[2][1] * dstWP.Y + bradford[2][2] * dstWP.Z;
     
-    // Build diagonal adaptation matrix
+    // Build diagonal adaptation matrix in cone domain
     float D[3];
     for (int i = 0; i < 3; ++i) {
-        D[i] = (src_cone[i] != 0.0f) ? (dst_cone[i] / src_cone[i]) : 1.0f;
+        D[i] = (std::abs(src_cone[i]) > 1e-6f) ? (dst_cone[i] / src_cone[i]) : 1.0f;
     }
     
     // M = B^-1 * D * B
-    // First compute D * B
     float DB[3][3];
     for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j) {
@@ -80,7 +82,6 @@ void ChromaticAdaptation::buildBradfordMatrix(const WhitePoint& srcWP, const Whi
         }
     }
     
-    // Then compute B^-1 * (D * B)
     for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j) {
             matrix[i][j] = 0;
@@ -91,8 +92,9 @@ void ChromaticAdaptation::buildBradfordMatrix(const WhitePoint& srcWP, const Whi
     }
 }
 
-void ChromaticAdaptation::adaptRGB(float& r, float& g, float& b, float srcKelvin, float dstKelvin) {
-    if (srcKelvin == dstKelvin) return;
+void ChromaticAdaptation::adaptRGB(float& r, float& g, float& b, 
+                                    float srcKelvin, float dstKelvin) {
+    if (std::abs(srcKelvin - dstKelvin) < 1.0f) return;
     
     WhitePoint srcWP = getWhitePointForTemperature(srcKelvin);
     WhitePoint dstWP = getWhitePointForTemperature(dstKelvin);

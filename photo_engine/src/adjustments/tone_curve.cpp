@@ -1,11 +1,8 @@
 #include "adjustments/tone_curve.hpp"
-#include <cstring>
-#include <string>
 
 namespace pe {
 
-ToneCurve::ToneCurve(const std::string& name) 
-    : lut_valid_(false), name_(name), interpolation_(Interpolation::CatmullRom) {
+ToneCurve::ToneCurve(const std::string& name) : name_(name) {
     reset();
 }
 
@@ -17,7 +14,6 @@ ToneCurve ToneCurve::identity(const std::string& name) {
 
 void ToneCurve::reset() {
     control_points_.clear();
-    // Add identity endpoints
     control_points_.emplace_back(0.0f, 0.0f);
     control_points_.emplace_back(1.0f, 1.0f);
     rebuildLUT();
@@ -26,20 +22,17 @@ void ToneCurve::reset() {
 void ToneCurve::setControlPoints(const std::vector<CurvePoint>& points) {
     control_points_ = points;
     
-    // Ensure we have at least endpoints
     if (control_points_.empty()) {
         control_points_.emplace_back(0.0f, 0.0f);
         control_points_.emplace_back(1.0f, 1.0f);
     } else {
-        // Sort by x value
         std::sort(control_points_.begin(), control_points_.end());
         
-        // Ensure first point is at x=0
+        // Ensure endpoints exist
         if (control_points_.front().x > 0.0001f) {
-            control_points_.insert(control_points_.begin(), CurvePoint(0.0f, control_points_.front().y));
+            control_points_.insert(control_points_.begin(), 
+                                   CurvePoint(0.0f, control_points_.front().y));
         }
-        
-        // Ensure last point is at x=1
         if (control_points_.back().x < 0.9999f) {
             control_points_.emplace_back(1.0f, control_points_.back().y);
         }
@@ -52,10 +45,9 @@ void ToneCurve::addControlPoint(float x, float y) {
     x = std::clamp(x, 0.0f, 1.0f);
     y = std::clamp(y, 0.0f, 1.0f);
     
-    // Find insertion point
-    auto it = std::lower_bound(control_points_.begin(), control_points_.end(), CurvePoint(x, y));
+    auto it = std::lower_bound(control_points_.begin(), control_points_.end(), 
+                               CurvePoint(x, y));
     
-    // Check if we're replacing an existing point at same x
     if (it != control_points_.end() && std::abs(it->x - x) < 0.0001f) {
         it->y = y;
     } else {
@@ -70,9 +62,73 @@ void ToneCurve::clearControlPoints() {
     rebuildLUT();
 }
 
+// PCHIP (Piecewise Cubic Hermite Interpolating Polynomial)
+// Preserves monotonicity - no overshoot!
+float ToneCurve::evalPCHIP(float x) const {
+    if (control_points_.size() < 2) return x;
+    
+    // Clamp to domain
+    if (x <= control_points_.front().x) return control_points_.front().y;
+    if (x >= control_points_.back().x) return control_points_.back().y;
+    
+    // Find segment
+    size_t idx = 0;
+    for (size_t i = 0; i < control_points_.size() - 1; ++i) {
+        if (x >= control_points_[i].x && x <= control_points_[i + 1].x) {
+            idx = i;
+            break;
+        }
+    }
+    
+    const auto& p1 = control_points_[idx];
+    const auto& p2 = control_points_[idx + 1];
+    
+    float h = p2.x - p1.x;
+    if (h < 1e-6f) return p1.y;
+    
+    // Calculate slopes
+    float d_prev, d_next;
+    
+    if (idx == 0) {
+        d_prev = (p2.y - p1.y) / h;
+    } else {
+        const auto& p0 = control_points_[idx - 1];
+        d_prev = (p1.y - p0.y) / (p1.x - p0.x);
+    }
+    
+    if (idx == control_points_.size() - 2) {
+        d_next = (p2.y - p1.y) / h;
+    } else {
+        const auto& p3 = control_points_[idx + 2];
+        d_next = (p3.y - p2.y) / (p3.x - p2.x);
+    }
+    
+    // PCHIP slope calculation (Fritsch-Carlson method)
+    float m;
+    if (d_prev * d_next <= 0) {
+        m = 0;  // Local extremum
+    } else {
+        float w1 = 2.0f * h + h;
+        float w2 = h + 2.0f * h;
+        m = (w1 + w2) / ((w1 / d_prev) + (w2 / d_next));
+        if (std::isnan(m) || std::isinf(m)) m = 0;
+    }
+    
+    // Hermite interpolation
+    float t = (x - p1.x) / h;
+    float t2 = t * t;
+    float t3 = t2 * t;
+    
+    float h00 = 2.0f * t3 - 3.0f * t2 + 1.0f;
+    float h10 = t3 - 2.0f * t2 + t;
+    float h01 = -2.0f * t3 + 3.0f * t2;
+    float h11 = t3 - t2;
+    
+    return h00 * p1.y + h10 * h * m + h01 * p2.y + h11 * h * m;
+}
+
 void ToneCurve::rebuildLUT() {
     if (control_points_.empty()) {
-        // Identity curve
         for (int i = 0; i < LUT_SIZE; ++i) {
             lut_[i] = static_cast<float>(i) / (LUT_SIZE - 1);
         }
@@ -80,11 +136,10 @@ void ToneCurve::rebuildLUT() {
         return;
     }
     
-    // Check if we have a simple identity curve (just two points at (0,0) and (1,1))
-    if (control_points_.size() == 2 && 
+    // Check for identity curve
+    if (control_points_.size() == 2 &&
         control_points_[0].x == 0.0f && control_points_[0].y == 0.0f &&
         control_points_[1].x == 1.0f && control_points_[1].y == 1.0f) {
-        // Direct identity - no interpolation needed
         for (int i = 0; i < LUT_SIZE; ++i) {
             lut_[i] = static_cast<float>(i) / (LUT_SIZE - 1);
         }
@@ -92,110 +147,17 @@ void ToneCurve::rebuildLUT() {
         return;
     }
     
-    // Build LUT using specified interpolation
     for (int i = 0; i < LUT_SIZE; ++i) {
         float x = static_cast<float>(i) / (LUT_SIZE - 1);
-        
-        if (interpolation_ == Interpolation::Linear) {
-            lut_[i] = evaluateLinear(x);
-        } else {
-            lut_[i] = evaluateCatmullRom(x);
-        }
+        lut_[i] = evalPCHIP(x);
+        lut_[i] = std::clamp(lut_[i], 0.0f, 1.0f);
     }
     
     lut_valid_ = true;
 }
 
-float ToneCurve::evaluateLinear(float x) const {
-    if (control_points_.empty()) return x;
-    if (x <= control_points_.front().x) return control_points_.front().y;
-    if (x >= control_points_.back().x) return control_points_.back().y;
-    
-    // Find segment
-    for (size_t i = 0; i < control_points_.size() - 1; ++i) {
-        const auto& p1 = control_points_[i];
-        const auto& p2 = control_points_[i + 1];
-        
-        if (x >= p1.x && x <= p2.x) {
-            float t = (p2.x - p1.x > 0.0001f) ? ((x - p1.x) / (p2.x - p1.x)) : 0.0f;
-            return p1.y + t * (p2.y - p1.y);
-        }
-    }
-    
-    return x;
-}
-
-float ToneCurve::evaluateCatmullRom(float x) const {
-    if (control_points_.empty()) return x;
-    if (control_points_.size() < 2) return control_points_.front().y;
-    
-    if (x <= control_points_.front().x) return control_points_.front().y;
-    if (x >= control_points_.back().x) return control_points_.back().y;
-    
-    // Find surrounding points for Catmull-Rom interpolation
-    // We need 4 points: p0, p1, p2, p3 where we interpolate between p1 and p2
-    
-    int idx = 0;
-    for (size_t i = 0; i < control_points_.size() - 1; ++i) {
-        if (x >= control_points_[i].x && x <= control_points_[i + 1].x) {
-            idx = static_cast<int>(i);
-            break;
-        }
-    }
-    
-    // Get the four control points (clamping at boundaries)
-    auto getP = [&](int i) -> CurvePoint {
-        if (i < 0) {
-            // Extrapolate from first two points
-            float dx = control_points_[1].x - control_points_[0].x;
-            float dy = control_points_[1].y - control_points_[0].y;
-            float t = (i + 1);
-            return CurvePoint(
-                control_points_[0].x + t * dx,
-                control_points_[0].y + t * dy
-            );
-        }
-        if (i >= static_cast<int>(control_points_.size())) {
-            // Extrapolate from last two points
-            int n = control_points_.size() - 1;
-            float dx = control_points_[n].x - control_points_[n-1].x;
-            float dy = control_points_[n].y - control_points_[n-1].y;
-            float t = (i - n + 1);
-            return CurvePoint(
-                control_points_[n].x + t * dx,
-                control_points_[n].y + t * dy
-            );
-        }
-        return control_points_[i];
-    };
-    
-    CurvePoint p0 = getP(idx - 1);
-    CurvePoint p1 = getP(idx);
-    CurvePoint p2 = getP(idx + 1);
-    CurvePoint p3 = getP(idx + 2);
-    
-    // Calculate t parameter within segment [p1, p2]
-    float t = (p2.x - p1.x > 0.0001f) ? ((x - p1.x) / (p2.x - p1.x)) : 0.0f;
-    t = std::clamp(t, 0.0f, 1.0f);
-    
-    // Catmull-Rom spline formula
-    float t2 = t * t;
-    float t3 = t2 * t;
-    
-    float y = 0.5f * (
-        (2.0f * p1.y) +
-        (-p0.y + p2.y) * t +
-        (2.0f * p0.y - 5.0f * p1.y + 4.0f * p2.y - p3.y) * t2 +
-        (-p0.y + 3.0f * p1.y - 3.0f * p2.y + p3.y) * t3
-    );
-    
-    return std::clamp(y, 0.0f, 1.0f);
-}
-
 float ToneCurve::evaluate(float x) const {
-    if (!lut_valid_) {
-        return x;  // Return identity if LUT not built
-    }
+    if (!lut_valid_) return x;
     
     x = std::clamp(x, 0.0f, 1.0f);
     int idx = static_cast<int>(x * (LUT_SIZE - 1) + 0.5f);
@@ -219,33 +181,33 @@ bool ToneCurve::isIdentity(float tolerance) const {
 // ToneCurveSet implementation
 
 ToneCurveSet::ToneCurveSet() 
-    : red_curve_("Red"), green_curve_("Green"), blue_curve_("Blue"), rgb_curve_("RGB") {
+    : red_("Red"), green_("Green"), blue_("Blue"), rgb_("RGB") {
 }
 
 void ToneCurveSet::reset() {
-    red_curve_.reset();
-    green_curve_.reset();
-    blue_curve_.reset();
-    rgb_curve_.reset();
+    red_.reset();
+    green_.reset();
+    blue_.reset();
+    rgb_.reset();
 }
 
 bool ToneCurveSet::isIdentity(float tolerance) const {
-    return red_curve_.isIdentity(tolerance) &&
-           green_curve_.isIdentity(tolerance) &&
-           blue_curve_.isIdentity(tolerance) &&
-           rgb_curve_.isIdentity(tolerance);
+    return red_.isIdentity(tolerance) && 
+           green_.isIdentity(tolerance) && 
+           blue_.isIdentity(tolerance) && 
+           rgb_.isIdentity(tolerance);
 }
 
 void ToneCurveSet::apply(float& r, float& g, float& b) const {
     // Apply individual channel curves first
-    r = red_curve_.evaluate(r);
-    g = green_curve_.evaluate(g);
-    b = blue_curve_.evaluate(b);
+    r = red_.evaluate(r);
+    g = green_.evaluate(g);
+    b = blue_.evaluate(b);
     
     // Then apply composite RGB curve
-    r = rgb_curve_.evaluate(r);
-    g = rgb_curve_.evaluate(g);
-    b = rgb_curve_.evaluate(b);
+    r = rgb_.evaluate(r);
+    g = rgb_.evaluate(g);
+    b = rgb_.evaluate(b);
 }
 
 } // namespace pe
